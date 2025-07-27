@@ -1,4 +1,5 @@
 import pymysql
+import asyncio
 from aiogram import Bot, Dispatcher, executor, types
 from config import TOKEN, DATABASE, ADMINS
 from keyboards import main_keyboard, confirm_clear_keyboard
@@ -27,12 +28,19 @@ async def start_command(message: types.Message):
 @dp.message_handler(lambda message: message.text == "Количество репорта")
 async def report_count(message: types.Message):
     if message.from_user.id in ADMINS:
-        connection = connect_to_database()
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) FROM reports WHERE active = 1")
-            count = cursor.fetchone()[0]
-        connection.close()
+        # Выполняем блокирующий запрос в отдельном потоке, чтобы не блокировать event-loop
+        def _get_count():
+            connection = connect_to_database()
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM reports WHERE active = 1")
+                result = cursor.fetchone()[0]
+            connection.close()
+            return result
+
+        count = await asyncio.to_thread(_get_count)
         await message.answer(f"В данный момент неотвеченных репортов: {count}")
+    else:
+        await message.answer("У Вас нет доступа к этой функции.")
 
 @dp.message_handler(lambda message: message.text == "Очистить репорт")
 async def clear_reports(message: types.Message):
@@ -41,19 +49,30 @@ async def clear_reports(message: types.Message):
             "Подтвердите очистку неотвеченных репортов.",
             reply_markup=confirm_clear_keyboard
         )
+    else:
+        await message.answer("У Вас нет доступа к этой функции.")
 
 @dp.callback_query_handler(lambda callback: callback.data in ["clear_reports_yes", "clear_reports_no"])
 async def confirm_clear(callback: types.CallbackQuery):
+    # Закрываем «часики» у пользователя независимо от результата
+    await callback.answer()
+
     if callback.from_user.id in ADMINS:
         if callback.data == "clear_reports_yes":
-            connection = connect_to_database()
-            with connection.cursor() as cursor:
-                cursor.execute("DELETE FROM reports WHERE active = 1")
-                connection.commit()
-            connection.close()
+            # Выполняем удаление в отдельном потоке, чтобы не блокировать event-loop
+            def _clear():
+                connection = connect_to_database()
+                with connection.cursor() as cursor:
+                    cursor.execute("DELETE FROM reports WHERE active = 1")
+                    connection.commit()
+                connection.close()
+
+            await asyncio.to_thread(_clear)
             await callback.message.answer("Все неотвеченные репорты очищены.")
         else:
             await callback.message.answer("Очистка отменена.")
+    else:
+        await callback.message.answer("У Вас нет доступа к этой функции.")
 
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
